@@ -1,164 +1,97 @@
+import asyncio
 import os
 import socket
 import time
-import asyncio
-import tempfile
 import discord
 import psutil
-
-from dotenv import load_dotenv
 from discord.ext import commands, tasks
+from dotenv import load_dotenv
 from datetime import datetime, timezone
 
 load_dotenv()
 
 TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 
-SERVER_CHANNEL_ID = int(
-    os.getenv("DISCORD_CHANNEL_ID", "0")
-)
+SERVER_CHANNEL_ID = int(os.getenv("DISCORD_CHANNEL_ID", "0"))
+HARDWARE_CHANNEL_ID = int(os.getenv("HARDWARE_CHANNEL_ID", "0"))
+LOG_CHANNEL_ID = int(os.getenv("LOG_CHANNEL_ID", "0"))
 
-HARDWARE_CHANNEL_ID = int(
-    os.getenv("HARDWARE_CHANNEL_ID", "0")
-)
-
-LOG_CHANNEL_ID = int(
-    os.getenv("LOG_CHANNEL_ID", "0")
-)
-
-SERVER_IP = os.getenv(
-    "SERVER_IP",
-    "127.0.0.1"
-)
-
-SERVER_PORT = int(
-    os.getenv("SERVER_PORT", "25565")
-)
+SERVER_IP = os.getenv("SERVER_IP", "127.0.0.1")
+SERVER_PORT = int(os.getenv("SERVER_PORT", "25565"))
 
 MINECRAFT_LOG = os.getenv(
     "MINECRAFT_LOG",
     "/home/nemszy/minecraft/logs/latest.log"
 )
 
+LOG_STATE_FILE = os.getenv(
+    "LOG_STATE_FILE",
+    "/home/nemszy/discord/.minecraft_log_state"
+)
+
 CHECK_INTERVAL = 300
 
-BASE_DIR = os.path.dirname(
-    os.path.abspath(__file__)
-)
-
-LOG_STATE_FILE = os.path.join(
-    BASE_DIR,
-    ".minecraft_log_state"
-)
-
 if not TOKEN:
-    raise RuntimeError(
-        "DISCORD_BOT_TOKEN is not set."
-    )
+    raise RuntimeError("DISCORD_BOT_TOKEN is not set.")
 
 if SERVER_CHANNEL_ID == 0:
-    raise RuntimeError(
-        "DISCORD_CHANNEL_ID is not set."
-    )
+    raise RuntimeError("DISCORD_CHANNEL_ID is not set.")
 
 if HARDWARE_CHANNEL_ID == 0:
-    raise RuntimeError(
-        "HARDWARE_CHANNEL_ID is not set."
-    )
+    raise RuntimeError("HARDWARE_CHANNEL_ID is not set.")
 
 if LOG_CHANNEL_ID == 0:
-    raise RuntimeError(
-        "LOG_CHANNEL_ID is not set."
-    )
+    raise RuntimeError("LOG_CHANNEL_ID is not set.")
 
 def get_timestamp():
-
-    return datetime.now(
-        timezone.utc
-    ).strftime(
+    return datetime.now(timezone.utc).strftime(
         "%d/%m/%Y UTC+0 %H:%M:%S"
     )
 
 def get_log_filename():
-
-    return datetime.now(
-        timezone.utc
-    ).strftime(
+    return datetime.now(timezone.utc).strftime(
         "log%d-%m-%Y UTC+0 %H-%M.txt"
     )
 
 def load_log_position():
-
-    if not os.path.exists(
-        LOG_STATE_FILE
-    ):
+    if not os.path.exists(LOG_STATE_FILE):
         return 0, 0
 
     try:
-
-        with open(
-            LOG_STATE_FILE,
-            "r",
-            encoding="utf-8"
-        ) as file:
-
+        with open(LOG_STATE_FILE, "r", encoding="utf-8") as file:
             data = file.read().strip()
 
         inode, position = data.split("|")
 
         return int(inode), int(position)
 
-    except Exception:
-
+    except (ValueError, OSError):
         return 0, 0
 
-def save_log_position(
-    inode,
-    position
-):
+def save_log_position(inode, position):
+    directory = os.path.dirname(LOG_STATE_FILE)
 
-    temp_file = (
-        f"{LOG_STATE_FILE}.tmp"
-    )
+    if directory:
+        os.makedirs(directory, exist_ok=True)
 
-    with open(
-        temp_file,
-        "w",
-        encoding="utf-8"
-    ) as file:
-
-        file.write(
-            f"{inode}|{position}"
-        )
-
-    os.replace(
-        temp_file,
-        LOG_STATE_FILE
-    )
+    with open(LOG_STATE_FILE, "w", encoding="utf-8") as file:
+        file.write(f"{inode}|{position}")
 
 def get_new_minecraft_logs():
-
-    if not os.path.exists(
-        MINECRAFT_LOG
-    ):
+    if not os.path.exists(MINECRAFT_LOG):
         return None
 
-    stat = os.stat(
-        MINECRAFT_LOG
-    )
+    stat = os.stat(MINECRAFT_LOG)
 
     current_inode = stat.st_ino
     current_size = stat.st_size
 
-    saved_inode, saved_position = (
-        load_log_position()
-    )
+    saved_inode, saved_position = load_log_position()
 
     if (
         current_inode != saved_inode
         or current_size < saved_position
     ):
-
         saved_position = 0
 
     if current_size == saved_position:
@@ -170,186 +103,99 @@ def get_new_minecraft_logs():
         encoding="utf-8",
         errors="replace"
     ) as file:
-
-        file.seek(
-            saved_position
-        )
+        file.seek(saved_position)
 
         new_content = file.read()
-
         new_position = file.tell()
 
-    if not new_content.strip():
-        save_log_position(
-            current_inode,
-            new_position
-        )
-
-        return None
-
-    return (
-        new_content,
+    save_log_position(
         current_inode,
         new_position
     )
 
-async def upload_minecraft_logs():
+    if not new_content.strip():
+        return None
 
-    channel = bot.get_channel(
-        LOG_CHANNEL_ID
-    )
+    return new_content
+
+async def upload_minecraft_logs():
+    channel = bot.get_channel(LOG_CHANNEL_ID)
 
     if channel is None:
-
-        print(
-            "ERROR: Log channel not found."
-        )
-
+        print("ERROR: Log channel not found.")
         return
 
     try:
+        new_logs = get_new_minecraft_logs()
 
-        result = (
-            await asyncio.to_thread(
-                get_new_minecraft_logs
-            )
-        )
-
-        if result is None:
-
-            print(
-                "No new Minecraft logs."
-            )
-
+        if new_logs is None:
+            print("No new Minecraft logs.")
             return
 
-        new_logs, inode, position = result
-
         filename = get_log_filename()
+        temp_path = f"/tmp/{filename}"
 
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            suffix=".txt",
-            delete=False
-        ) as file:
+        with open(temp_path, "w", encoding="utf-8") as file:
+            file.write("Minecraft Server Log\n")
+            file.write(f"Generated: {get_timestamp()}\n")
+            file.write(f"Source: {MINECRAFT_LOG}\n")
+            file.write("=" * 80)
+            file.write("\n\n")
+            file.write(new_logs)
 
-            temp_path = file.name
-
-            file.write(
-                "Minecraft Server Log\n"
+        await channel.send(
+            content=(
+                f"📜 Minecraft server logs "
+                f"from `{get_timestamp()}`"
+            ),
+            file=discord.File(
+                temp_path,
+                filename=filename
             )
-
-            file.write(
-                f"Generated: {get_timestamp()}\n"
-            )
-
-            file.write(
-                f"Source: {MINECRAFT_LOG}\n"
-            )
-
-            file.write(
-                "=" * 80
-            )
-
-            file.write(
-                "\n\n"
-            )
-
-            file.write(
-                new_logs
-            )
-
-        try:
-
-            await channel.send(
-                content=(
-                    f"📜 Minecraft server logs "
-                    f"from `{get_timestamp()}`"
-                ),
-                file=discord.File(
-                    temp_path,
-                    filename=filename
-                )
-            )
-
-        finally:
-
-            if os.path.exists(
-                temp_path
-            ):
-
-                os.remove(
-                    temp_path
-                )
-
-        save_log_position(
-            inode,
-            position
         )
 
-        print(
-            f"Minecraft logs uploaded: "
-            f"{filename}"
-        )
+        os.remove(temp_path)
+
+        print(f"Minecraft logs uploaded: {filename}")
 
     except Exception as error:
-
         print(
-            "ERROR: Minecraft log upload "
-            f"failed: {error}"
+            f"ERROR: Minecraft log upload failed: {error}"
         )
 
-
 def is_server_online():
-
     try:
-
         with socket.create_connection(
-            (
-                SERVER_IP,
-                SERVER_PORT
-            ),
+            (SERVER_IP, SERVER_PORT),
             timeout=3
         ):
-
             return True
 
     except OSError:
-
         return False
 
 def get_hardware_data():
-
-    cpu_usage = psutil.cpu_percent(
-        interval=1
-    )
-
     core_usage = psutil.cpu_percent(
         interval=1,
         percpu=True
     )
 
-    temperatures = (
-        psutil.sensors_temperatures()
+    cpu_usage = (
+        sum(core_usage) / len(core_usage)
+        if core_usage
+        else 0
     )
+
+    temperatures = psutil.sensors_temperatures()
 
     core_temps = []
 
-    for sensor in temperatures.get(
-        "coretemp",
-        []
-    ):
-
+    for sensor in temperatures.get("coretemp", []):
         if (
             sensor.current is not None
-            and sensor.label
             and sensor.label.startswith("Core")
         ):
-
-            core_temps.append(
-                sensor.current
-            )
+            core_temps.append(sensor.current)
 
     cpu_temp = (
         max(core_temps)
@@ -358,11 +204,18 @@ def get_hardware_data():
     )
 
     ram = psutil.virtual_memory()
+
+    ram_used = ram.used / (1024 ** 3)
+    ram_total = ram.total / (1024 ** 3)
+
     storage = psutil.disk_usage("/")
+
+    storage_used = storage.used / (1024 ** 3)
+    storage_total = storage.total / (1024 ** 3)
+
     battery_info = psutil.sensors_battery()
 
     if battery_info:
-
         battery = battery_info.percent
 
         power_status = (
@@ -372,43 +225,27 @@ def get_hardware_data():
         )
 
     else:
-
         battery = None
         power_status = "N/A"
 
-    uptime_seconds = (
-        time.time()
-        - psutil.boot_time()
-    )
+    uptime_seconds = time.time() - psutil.boot_time()
 
-    days = int(
-        uptime_seconds // 86400
-    )
+    days = int(uptime_seconds // 86400)
+    hours = int((uptime_seconds % 86400) // 3600)
+    minutes = int((uptime_seconds % 3600) // 60)
 
-    hours = int(
-        (uptime_seconds % 86400) // 3600
-    )
-
-    minutes = int(
-        (uptime_seconds % 3600) // 60
-    )
-
-    uptime = (
-        f"{days}d "
-        f"{hours}h "
-        f"{minutes}m"
-    )
+    uptime = f"{days}d {hours}h {minutes}m"
 
     return {
         "cpu_usage": cpu_usage,
         "core_usage": core_usage,
         "core_temps": core_temps,
         "cpu_temp": cpu_temp,
-        "ram_used": ram.used / 1024 ** 3,
-        "ram_total": ram.total / 1024 ** 3,
+        "ram_used": ram_used,
+        "ram_total": ram_total,
         "ram_percent": ram.percent,
-        "storage_used": storage.used / 1024 ** 3,
-        "storage_total": storage.total / 1024 ** 3,
+        "storage_used": storage_used,
+        "storage_total": storage_total,
         "storage_percent": storage.percent,
         "battery": battery,
         "power_status": power_status,
@@ -416,34 +253,21 @@ def get_hardware_data():
     }
 
 def get_hardware_embed(data):
-
     core_lines = []
 
-    for i, usage in enumerate(
-        data["core_usage"]
-    ):
-
-        if i < len(
-            data["core_temps"]
-        ):
-
+    for index, usage in enumerate(data["core_usage"]):
+        if index < len(data["core_temps"]):
             temperature = (
-                f"{data['core_temps'][i]:.1f}°C"
+                f"{data['core_temps'][index]:.1f}°C"
             )
-
         else:
-
             temperature = "N/A"
 
         core_lines.append(
-            f"Core {i}: "
-            f"{usage:.1f}% | "
-            f"{temperature}"
+            f"Core {index}: {usage:.1f}% | {temperature}"
         )
 
-    core_text = "\n".join(
-        core_lines
-    )
+    core_text = "\n".join(core_lines)
 
     cpu_temp = (
         f"{data['cpu_temp']:.1f}°C"
@@ -460,16 +284,13 @@ def get_hardware_embed(data):
     return discord.Embed(
         title="Hardware Status",
         description=(
-            f"CPU Usage: "
-            f"{data['cpu_usage']:.1f}%\n\n"
+            f"CPU Usage: {data['cpu_usage']:.1f}%\n\n"
             f"{core_text}\n\n"
             f"CPU Temp: {cpu_temp}\n\n"
-            f"RAM: "
-            f"{data['ram_used']:.1f} / "
+            f"RAM: {data['ram_used']:.1f} / "
             f"{data['ram_total']:.1f} GB "
             f"({data['ram_percent']:.1f}%)\n\n"
-            f"Storage: "
-            f"{data['storage_used']:.1f} / "
+            f"Storage: {data['storage_used']:.1f} / "
             f"{data['storage_total']:.1f} GB "
             f"({data['storage_percent']:.1f}%)\n\n"
             f"Battery: {battery}\n"
@@ -480,24 +301,18 @@ def get_hardware_embed(data):
         color=discord.Color.blue()
     )
 
-def create_server_embed(
-    online
-):
+def create_server_embed(online):
+    if online:
+        description = "🟢 Server is Online"
+        color = discord.Color.green()
+    else:
+        description = "🔴 Server is Offline"
+        color = discord.Color.red()
 
     embed = discord.Embed(
         title="Server Status",
-        description=(
-            "🟢 Server is Online"
-            if online
-            else
-            "🔴 Server is Offline"
-        ),
-        color=(
-            discord.Color.green()
-            if online
-            else
-            discord.Color.red()
-        )
+        description=description,
+        color=color
     )
 
     embed.add_field(
@@ -514,16 +329,11 @@ def create_server_embed(
 
     embed.add_field(
         name="Support",
-        value=(
-            "Please contact support "
-            "if an issue occurs"
-        ),
+        value="Please contact support if an issue occurs",
         inline=False
     )
 
-    embed.set_footer(
-        text="Bot v1.0.0"
-    )
+    embed.set_footer(text="Bot v1.0.0")
 
     return embed
 
@@ -536,159 +346,108 @@ bot = commands.Bot(
 
 last_status = None
 
-@tasks.loop(
-    seconds=CHECK_INTERVAL
-)
+@tasks.loop(seconds=CHECK_INTERVAL)
 async def check_server_status():
-
     global last_status
 
-    channel = bot.get_channel(
-        SERVER_CHANNEL_ID
-    )
+    channel = bot.get_channel(SERVER_CHANNEL_ID)
 
     if channel is None:
-
-        print(
-            "ERROR: Server status "
-            "channel not found."
-        )
-
+        print("ERROR: Server status channel not found.")
         return
 
     try:
+        online = is_server_online()
+        status = "online" if online else "offline"
 
-        online = await asyncio.to_thread(
-            is_server_online
-        )
+        if last_status is None:
+            last_status = status
 
-        status = (
-            "online"
-            if online
-            else
-            "offline"
-        )
+            await channel.send(
+                embed=create_server_embed(online)
+            )
 
-        if (
-            last_status is not None
-            and status == last_status
-        ):
+            print(
+                f"Minecraft server is "
+                f"{status.upper()}."
+            )
 
+            return
+
+        if status == last_status:
             return
 
         last_status = status
 
         await channel.send(
-            embed=create_server_embed(
-                online
-            )
+            embed=create_server_embed(online)
         )
 
         print(
-            f"Minecraft server is "
-            f"{status.upper()}."
+            f"Minecraft server changed "
+            f"to {status.upper()}."
         )
 
     except Exception as error:
-
         print(
-            "ERROR: Server monitoring "
-            f"failed: {error}"
+            f"ERROR: Server monitoring failed: {error}"
         )
 
-@tasks.loop(
-    seconds=CHECK_INTERVAL
-)
+@tasks.loop(seconds=CHECK_INTERVAL)
 async def send_hardware_status():
-
-    channel = bot.get_channel(
-        HARDWARE_CHANNEL_ID
-    )
+    channel = bot.get_channel(HARDWARE_CHANNEL_ID)
 
     if channel is None:
-
-        print(
-            "ERROR: Hardware channel "
-            "not found."
-        )
-
+        print("ERROR: Hardware channel not found.")
         return
 
     try:
+        data = get_hardware_data()
+        embed = get_hardware_embed(data)
 
-        data = await asyncio.to_thread(
-            get_hardware_data
-        )
+        await channel.send(embed=embed)
 
-        await channel.send(
-            embed=get_hardware_embed(
-                data
-            )
-        )
-
-        print(
-            "Hardware status sent to Discord."
-        )
+        print("Hardware status sent to Discord.")
 
     except Exception as error:
-
         print(
-            "ERROR: Hardware monitoring "
-            f"failed: {error}"
+            f"ERROR: Hardware monitoring failed: {error}"
         )
 
-@tasks.loop(
-    seconds=CHECK_INTERVAL
-)
+@tasks.loop(seconds=CHECK_INTERVAL)
 async def minecraft_log_task():
-
     try:
-
         await upload_minecraft_logs()
 
     except Exception as error:
-
         print(
-            "ERROR: Minecraft log task "
-            f"failed: {error}"
+            f"ERROR: Minecraft log task failed: {error}"
         )
 
 @check_server_status.before_loop
 async def before_server_status():
-
     await bot.wait_until_ready()
 
 @send_hardware_status.before_loop
 async def before_hardware_status():
-
     await bot.wait_until_ready()
 
 @minecraft_log_task.before_loop
 async def before_minecraft_log_task():
-
     await bot.wait_until_ready()
-
-    await asyncio.sleep(
-        30
-    )
+    await asyncio.sleep(30)
 
 @bot.event
 async def on_ready():
-
-    print(
-        f"Logged in as {bot.user}!"
-    )
+    print(f"Logged in as {bot.user}!")
 
     if not check_server_status.is_running():
-
         check_server_status.start()
 
     if not send_hardware_status.is_running():
-
         send_hardware_status.start()
 
     if not minecraft_log_task.is_running():
-
         minecraft_log_task.start()
 
 bot.run(TOKEN)
