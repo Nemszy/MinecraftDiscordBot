@@ -43,5 +43,3 @@ The log system only uploads new log lines instead of repeatedly uploading the en
 * A Minecraft server for the Minecraft monitoring features
 
 Python dependencies are listed in [`requirements.txt`](requirements.txt) and a installation guide!.
-
-# Confi
